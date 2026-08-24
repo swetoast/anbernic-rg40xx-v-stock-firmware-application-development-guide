@@ -282,8 +282,12 @@ It includes:
 - Axis current/minimum/maximum tracking
 - Unknown-button discovery
 - Input report export
-- Verified 440 Hz and 880 Hz audio tests
-- Left, right and both-channel audio sequence
+- Dedicated left-channel and right-channel tests
+- Left, right and both-channel stereo sequence
+- Frequency-range test from 100 Hz through 16 kHz
+- Output-level progression from 1% through 25% waveform amplitude
+- Low-frequency resonance test from 60 Hz through 315 Hz
+- Append-only `data/audio_report.txt` with enumerated devices, obtained SDL format and test result
 - Read-only system/runtime information
 
 ## 9. Installation and validation
