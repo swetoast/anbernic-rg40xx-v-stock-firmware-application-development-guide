@@ -2,13 +2,13 @@
 
 This guide documents application packaging, runtime behaviour and hardware interfaces tested on an Anbernic RG40XX V using the stock firmware environment referred to here as **TF1**.
 
-The guide distinguishes between:
+This guide distinguishes between:
 
 - **Verified behaviour**, observed directly on the tested device.
 - **Recommended practice**, based on those verified results.
 - **Unresolved behaviour**, which should not be assumed by applications.
 
-Other firmware releases may use different paths, libraries, mappings, display initialisation or audio behaviour.
+These findings apply to the tested TF1 environment. Other firmware releases may use different paths, libraries, mappings, display initialisation or audio behaviour.
 
 ## 1. Verified environment
 
@@ -51,7 +51,7 @@ Use a top-level launcher and a matching application folder:
     └── logs/
 ```
 
-Only include directories the application uses.
+Include only the directories required by the application.
 
 ### Directory roles
 
@@ -178,11 +178,11 @@ Open joystick index `0` and verify the reported device name. The tested device r
 ANBERNIC-keys
 ```
 
-Use the accelerated renderer with present synchronisation first, then fall back to the software renderer if creation fails.
+Request the accelerated renderer with present synchronisation first. If renderer creation fails, retry with the software renderer.
 
 ## 5. Verified physical input mapping
 
-The following mapping was verified through the Diagnostics application and direct console testing.
+The following mapping was verified by direct testing on the console.
 
 ### D-pad
 
@@ -241,7 +241,7 @@ Combined diagonal values are possible:
 
 The physical stick press is `button 9`.
 
-The tested Linux input inventory exposes `ANBERNIC-keys` through both `js0` and `event1`. SDL button and hat events work, but analogue movement was not reliably observed through the initial SDL event parser. The Diagnostics application therefore reads analogue movement non-blockingly from:
+The tested Linux input inventory exposes `ANBERNIC-keys` through both `js0` and `event1`. SDL button and hat events work, but analogue movement was not reliably observed through the initial SDL event parser. A reliable implementation reads analogue movement non-blockingly from:
 
 ```text
 /dev/input/js0
@@ -292,7 +292,7 @@ Axis 1: vertical
   Down:  positive
 ```
 
-Discover and report every available axis instead of assuming that only axes `0` and `1` exist. Axes `2` and `3` have been reported but remain physically unassigned.
+Enumerate every available axis rather than assuming that only axes `0` and `1` exist. Axes `2` and `3` have been reported but remain physically unassigned.
 
 A practical initial dead zone is:
 
@@ -300,7 +300,7 @@ A practical initial dead zone is:
 DEAD_ZONE = 8000
 ```
 
-Applications requiring precision should support calibration rather than treating that value as universal.
+Applications requiring precise analogue input should support calibration instead of treating this value as universal.
 
 ## 7. Verified internal-speaker audio
 
@@ -339,13 +339,13 @@ Use an isolated audio worker:
 10. Close the device.
 11. Exit the worker with `os._exit()`.
 
-Do not call global `SDL_Quit()` inside the isolated audio worker. That call blocked during testing after the device had closed. The graphical parent can perform normal SDL video and input cleanup.
+Do not call global `SDL_Quit()` from the isolated audio worker. That call blocked during testing after the device had closed. The graphical parent process can still perform normal SDL video and input cleanup.
 
 Do not use blocking `aplay` from the graphical application. The tested approach became unresponsive and required a forced power-off.
 
-### Diagnostics audio tests
+### Useful audio validation patterns
 
-The reference Diagnostics application includes:
+Useful validation patterns include:
 
 - Left-channel test.
 - Right-channel test.
@@ -353,11 +353,11 @@ The reference Diagnostics application includes:
 - Frequency-range test from 100 Hz through 16 kHz.
 - Output-level progression from 1% through 25% waveform amplitude.
 - Low-frequency resonance test from 60 Hz through 315 Hz.
-- Append-only `data/audio_report.txt` containing enumerated devices, obtained format and result.
+- Optional logging of enumerated devices, obtained format and playback result.
 
 ## 8. Battery telemetry
 
-Battery telemetry is exposed through:
+TF1 exposes battery telemetry through the AXP2202 power-supply interface:
 
 ```text
 /sys/class/power_supply/axp2202-battery
@@ -375,7 +375,7 @@ temp
 voltage_now
 ```
 
-Use read-only access and tolerate missing or temporarily unreadable attributes.
+Read these attributes without modifying them, and handle missing or temporarily unreadable values.
 
 ### Unit conversions
 
@@ -397,7 +397,7 @@ def read_sysfs(path, default="Unavailable"):
         return default
 ```
 
-The Diagnostics Battery screen is intentionally battery-specific. It displays:
+Applications can use these attributes to display:
 
 - Charge level.
 - Charging or discharging state.
@@ -407,11 +407,11 @@ The Diagnostics Battery screen is intentionally battery-specific. It displays:
 - Capacity level.
 - Battery presence.
 
-Do not write to power-supply sysfs attributes from a diagnostics application.
+Treat the power-supply sysfs attributes documented here as read-only.
 
 ## 9. System information, USB power and thermals
 
-Non-battery telemetry belongs on System Information rather than Battery.
+TF1 exposes USB power status and system thermal readings through standard Linux sysfs interfaces.
 
 ### USB power
 
@@ -433,7 +433,7 @@ thermal_zone4: axp2202-battery
 
 Thermal-zone values are reported in millidegrees Celsius. Divide by `1,000` for degrees Celsius.
 
-The Diagnostics System Information screen groups:
+Applications can combine these interfaces with runtime information such as:
 
 - Architecture, kernel, Python and C library information.
 - SDL video driver and display resolution.
@@ -475,11 +475,11 @@ No X11 display
 No Wayland display
 ```
 
-Continue using the verified fullscreen SDL2 path. Do not write directly to `/dev/fb0`.
+Use the verified fullscreen SDL2 path instead of writing directly to `/dev/fb0`.
 
-### Diagnostics screen patterns
+### Recommended screen-test patterns
 
-The reference application includes:
+Recommended visual test patterns include:
 
 - Solid red, green, blue, white and black.
 - Greyscale steps.
@@ -490,7 +490,7 @@ The reference application includes:
 - Outer border, inset borders, corner markers and centre crosshair.
 - Cycling black, white, red, green and blue pixel-inspection fields.
 
-Controls:
+One practical control scheme is:
 
 ```text
 D-pad Left/Right: previous or next pattern
@@ -499,11 +499,11 @@ X:                 show or hide pattern labels
 B:                 return to Diagnostics
 ```
 
-Brightness adjustment and resolution switching are intentionally not implemented because no safe control interface has been verified.
+Do not implement brightness adjustment or resolution switching until a safe control interface has been verified.
 
-## 11. Diagnostics reference application
+## 11. Reference implementation
 
-The reference package uses:
+A tested reference package uses:
 
 ```text
 /mnt/mmc/Roms/APPS/
@@ -515,7 +515,7 @@ The reference package uses:
     └── logs/
 ```
 
-The application currently demonstrates:
+The reference implementation demonstrates:
 
 - Fullscreen SDL2 and Pillow rendering.
 - Physical-layout button testing.
@@ -523,11 +523,11 @@ The application currently demonstrates:
 - Direct `/dev/input/js0` analogue monitoring.
 - Axis range tracking.
 - Unknown-button discovery.
-- Input-report export.
-- Expanded audio tests and audio-report export.
+- Input-state and axis-range reporting.
+- Expanded audio validation and optional result logging.
 - Screen and pixel test patterns.
-- Battery-only telemetry.
-- Runtime, USB-power and thermal information.
+- Battery telemetry through the AXP2202 power-supply interface.
+- Runtime, USB-power and thermal telemetry.
 
 ## 12. Installation and validation
 
@@ -589,7 +589,7 @@ readelf -d my-app | grep NEEDED
 ldd my-app
 ```
 
-AArch64 alone does not guarantee compatibility. Cross-built applications must not require a glibc newer than `2.35`.
+An AArch64 build is not automatically compatible with TF1. Cross-built applications must not require a glibc version newer than `2.35`.
 
 ## 16. Safe development workflow
 
