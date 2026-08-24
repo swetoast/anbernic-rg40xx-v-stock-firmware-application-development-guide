@@ -1,24 +1,24 @@
 # RG40XX V Stock Firmware Application Development Guide
 
-## 1. Verified environment
+## 1. Scope and verified environment
 
-This guide documents the application format and runtime behaviour directly tested on an Anbernic RG40XX V running the tested stock firmware.
+This guide documents application packaging and runtime behaviour directly tested on an Anbernic RG40XX V using the tested stock firmware environment, referred to here as **TF1**.
 
 ```text
-Architecture: aarch64
-Operating-system base: Ubuntu 22.04
-Python: 3.10.12
-glibc: 2.35
-Kernel: Linux 4.9.170
-Display: 640 x 480 at 60 Hz
-SDL video driver: mali
-SDL renderer: opengles2
-SDL joystick: ANBERNIC-keys
+Architecture:      aarch64
+Operating system:  Ubuntu 22.04 base
+Python:            3.10.12
+glibc:             2.35
+Kernel:            Linux 4.9.170
+Display:           640 x 480 at 60 Hz
+SDL video driver:  mali
+SDL renderer:      opengles2
+SDL joystick:      ANBERNIC-keys
 ```
 
-The findings apply to the tested stock firmware. Other releases may use different launcher paths, bundled libraries, input mappings, display initialisation or audio handling.
+Other firmware releases may use different launcher paths, libraries, mappings, display initialisation or audio handling.
 
-## 2. Required installed structure
+## 2. TF1 application structure
 
 The tested single-card APPS path is:
 
@@ -26,9 +26,7 @@ The tested single-card APPS path is:
 /mnt/mmc/Roms/APPS
 ```
 
-A folder containing only `launch.sh` did not appear in the stock menu. A shell script placed directly in `/mnt/mmc/Roms/APPS` did appear.
-
-Use this pattern:
+A folder containing only a launcher did not appear in the stock menu. A shell script placed directly in `APPS` did appear. Use a top-level launcher and a matching application folder:
 
 ```text
 /mnt/mmc/Roms/APPS/
@@ -37,14 +35,7 @@ Use this pattern:
     ├── main.py
     ├── audio_worker.py
     ├── app/
-    │   ├── __init__.py
-    │   ├── ui.py
-    │   ├── input.py
-    │   └── settings.py
     ├── assets/
-    │   ├── images/
-    │   ├── fonts/
-    │   └── sounds/
     ├── modules/
     ├── lib/
     ├── config/
@@ -52,36 +43,11 @@ Use this pattern:
     └── logs/
 ```
 
-Only include directories the application actually needs.
+Only include directories the application actually uses. A separate file is justified when it represents a substantial subsystem. The audio worker is separate because the verified audio shutdown path requires an isolated process.
 
-Terminology used in this guide:
+## 3. Complete launcher
 
-- **application**: the running program.
-- **launcher**: the top-level `My_App.sh` menu entry.
-- **application folder**: the matching `My_App/` directory.
-- **application package**: the launcher plus the application folder.
-- **SDL joystick**: SDL's representation of the console's built-in controls.
-
-### Directory purposes
-
-- `My_App.sh`: visible stock-menu entry and launcher.
-- `main.py`: Python entry point.
-- `audio_worker.py`: optional separate audio process, referred to in this guide as the audio worker.
-- `app/`: application modules.
-- `assets/`: read-only shipped images, fonts and sounds.
-- `modules/`: app-local pure-Python dependencies.
-- `lib/`: optional AArch64 shared libraries.
-- `config/`: persistent settings.
-- `data/`: saves, cache, state and reports.
-- `logs/`: runtime logs.
-
-## 3. Complete launcher sample
-
-Save this as:
-
-```text
-/mnt/mmc/Roms/APPS/My_App.sh
-```
+Save as `/mnt/mmc/Roms/APPS/My_App.sh`:
 
 ```bash
 #!/bin/bash
@@ -109,53 +75,26 @@ if [ -d "$APP_DIR/lib" ]; then
 fi
 
 cd "$APP_DIR" || exit 1
-
 "$PYTHON" "$APP_DIR/main.py" >> "$LOG_FILE" 2>&1
 STATUS=$?
-
 sync
 exit "$STATUS"
 ```
 
-Validate it with:
+Validate and normalise the launcher:
 
 ```bash
 bash -n /mnt/mmc/Roms/APPS/My_App.sh
 sed -i 's/\r$//' /mnt/mmc/Roms/APPS/My_App.sh
 ```
 
-Do not run `apt install`, `pip install`, package upgrades or firmware modifications from the launcher.
+Do not run package installation, upgrades or firmware modifications from the launcher.
 
-## 4. Minimal graphical and controller sample
+## 4. SDL application baseline
 
-Save this as:
-
-```text
-/mnt/mmc/Roms/APPS/My_App/main.py
-```
-
-This sample creates a full-screen Pillow-generated interface through SDL2. A, X and Y update the screen. B exits to the stock menu.
+The tested graphical path is Python 3, Pillow-generated frames and SDL2 display/input through `ctypes`. Use:
 
 ```python
-#!/usr/bin/env python3
-
-from __future__ import annotations
-
-import ctypes
-import ctypes.util
-import sys
-from pathlib import Path
-
-from PIL import Image, ImageDraw, ImageFont
-
-APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
-SCREEN_BMP = DATA_DIR / "screen.bmp"
-
-WIDTH = 640
-HEIGHT = 480
-
 SDL_INIT_VIDEO = 0x00000020
 SDL_INIT_JOYSTICK = 0x00000200
 SDL_WINDOW_FULLSCREEN = 0x00000001
@@ -163,584 +102,193 @@ SDL_WINDOWPOS_UNDEFINED = 0x1FFF0000
 SDL_RENDERER_SOFTWARE = 0x00000001
 SDL_RENDERER_ACCELERATED = 0x00000002
 SDL_RENDERER_PRESENTVSYNC = 0x00000004
+
 SDL_QUIT = 0x100
+SDL_JOYAXISMOTION = 0x600
+SDL_JOYHATMOTION = 0x602
 SDL_JOYBUTTONDOWN = 0x603
-
-BUTTON_A = 0
-BUTTON_B = 1
-BUTTON_Y = 2
-BUTTON_X = 3
-
-
-def decode(value):
-    return value.decode("utf-8", "replace") if value else None
-
-
-def load_sdl():
-    candidates = [
-        ctypes.util.find_library("SDL2"),
-        "libSDL2-2.0.so.0",
-        "/usr/lib/aarch64-linux-gnu/libSDL2-2.0.so.0",
-    ]
-
-    for candidate in filter(None, candidates):
-        try:
-            return ctypes.CDLL(candidate)
-        except OSError:
-            pass
-
-    raise RuntimeError("SDL2 library not found")
-
-
-def bind_sdl(sdl):
-    sdl.SDL_Init.argtypes = [ctypes.c_uint32]
-    sdl.SDL_Init.restype = ctypes.c_int
-    sdl.SDL_Quit.argtypes = []
-    sdl.SDL_GetError.restype = ctypes.c_char_p
-
-    sdl.SDL_CreateWindow.argtypes = [
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_uint32,
-    ]
-    sdl.SDL_CreateWindow.restype = ctypes.c_void_p
-    sdl.SDL_DestroyWindow.argtypes = [ctypes.c_void_p]
-
-    sdl.SDL_CreateRenderer.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_uint32,
-    ]
-    sdl.SDL_CreateRenderer.restype = ctypes.c_void_p
-    sdl.SDL_DestroyRenderer.argtypes = [ctypes.c_void_p]
-
-    sdl.SDL_RWFromFile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-    sdl.SDL_RWFromFile.restype = ctypes.c_void_p
-    sdl.SDL_LoadBMP_RW.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    sdl.SDL_LoadBMP_RW.restype = ctypes.c_void_p
-    sdl.SDL_FreeSurface.argtypes = [ctypes.c_void_p]
-    sdl.SDL_CreateTextureFromSurface.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    sdl.SDL_CreateTextureFromSurface.restype = ctypes.c_void_p
-    sdl.SDL_DestroyTexture.argtypes = [ctypes.c_void_p]
-
-    sdl.SDL_RenderClear.argtypes = [ctypes.c_void_p]
-    sdl.SDL_RenderCopy.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-    ]
-    sdl.SDL_RenderPresent.argtypes = [ctypes.c_void_p]
-
-    sdl.SDL_PollEvent.argtypes = [ctypes.c_void_p]
-    sdl.SDL_PollEvent.restype = ctypes.c_int
-    sdl.SDL_Delay.argtypes = [ctypes.c_uint32]
-
-    sdl.SDL_NumJoysticks.restype = ctypes.c_int
-    sdl.SDL_JoystickOpen.argtypes = [ctypes.c_int]
-    sdl.SDL_JoystickOpen.restype = ctypes.c_void_p
-    sdl.SDL_JoystickClose.argtypes = [ctypes.c_void_p]
-
-
-def sdl_error(sdl):
-    return decode(sdl.SDL_GetError()) or "Unknown SDL error"
-
-
-def get_font(size):
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    ]
-
-    for candidate in candidates:
-        if Path(candidate).exists():
-            return ImageFont.truetype(candidate, size)
-
-    return ImageFont.load_default()
-
-
-def make_screen(last_button=None):
-    image = Image.new("RGB", (WIDTH, HEIGHT), (12, 18, 30))
-    draw = ImageDraw.Draw(image)
-    title_font = get_font(30)
-    body_font = get_font(20)
-
-    draw.rectangle((0, 0, WIDTH, 64), fill=(28, 82, 145))
-    draw.text((22, 14), "RG40XX V Sample App", font=title_font, fill="white")
-    draw.text(
-        (24, 108),
-        "Python, Pillow, SDL2 and built-in controls exposed as an SDL joystick are working.",
-        font=body_font,
-        fill=(215, 225, 240),
-    )
-    draw.text(
-        (24, 162),
-        f"Last button: {last_button if last_button is not None else 'none'}",
-        font=body_font,
-        fill=(120, 230, 155),
-    )
-    draw.text(
-        (24, 360),
-        "Press A, X or Y to update the screen.",
-        font=body_font,
-        fill="white",
-    )
-    draw.text(
-        (24, 404),
-        "Press B to return to the stock menu.",
-        font=body_font,
-        fill=(255, 195, 105),
-    )
-    image.save(SCREEN_BMP, "BMP")
-
-
-def create_texture(sdl, renderer):
-    rwops = sdl.SDL_RWFromFile(str(SCREEN_BMP).encode(), b"rb")
-    if not rwops:
-        raise RuntimeError(f"SDL_RWFromFile failed: {sdl_error(sdl)}")
-
-    surface = sdl.SDL_LoadBMP_RW(rwops, 1)
-    if not surface:
-        raise RuntimeError(f"SDL_LoadBMP_RW failed: {sdl_error(sdl)}")
-
-    texture = sdl.SDL_CreateTextureFromSurface(renderer, surface)
-    sdl.SDL_FreeSurface(surface)
-
-    if not texture:
-        raise RuntimeError(
-            f"SDL_CreateTextureFromSurface failed: {sdl_error(sdl)}"
-        )
-
-    return texture
-
-
-def render(sdl, renderer, old_texture, last_button=None):
-    make_screen(last_button)
-
-    if old_texture:
-        sdl.SDL_DestroyTexture(old_texture)
-
-    texture = create_texture(sdl, renderer)
-    sdl.SDL_RenderClear(renderer)
-    sdl.SDL_RenderCopy(renderer, texture, None, None)
-    sdl.SDL_RenderPresent(renderer)
-    return texture
-
-
-def main():
-    sdl = load_sdl()
-    bind_sdl(sdl)
-
-    if sdl.SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0:
-        raise RuntimeError(f"SDL_Init failed: {sdl_error(sdl)}")
-
-    window = None
-    renderer = None
-    joystick = None
-    texture = None
-
-    try:
-        if sdl.SDL_NumJoysticks() > 0:
-            joystick = sdl.SDL_JoystickOpen(0)
-
-        if not joystick:
-            raise RuntimeError("ANBERNIC-keys joystick could not be opened")
-
-        window = sdl.SDL_CreateWindow(
-            b"RG40XX V Sample App",
-            SDL_WINDOWPOS_UNDEFINED,
-            SDL_WINDOWPOS_UNDEFINED,
-            WIDTH,
-            HEIGHT,
-            SDL_WINDOW_FULLSCREEN,
-        )
-
-        if not window:
-            raise RuntimeError(f"SDL_CreateWindow failed: {sdl_error(sdl)}")
-
-        renderer = sdl.SDL_CreateRenderer(
-            window,
-            -1,
-            SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC,
-        )
-
-        if not renderer:
-            renderer = sdl.SDL_CreateRenderer(
-                window,
-                -1,
-                SDL_RENDERER_SOFTWARE,
-            )
-
-        if not renderer:
-            raise RuntimeError(f"SDL_CreateRenderer failed: {sdl_error(sdl)}")
-
-        texture = render(sdl, renderer, texture)
-        event = ctypes.create_string_buffer(64)
-        running = True
-
-        while running:
-            while sdl.SDL_PollEvent(ctypes.byref(event)):
-                raw = event.raw
-                event_type = int.from_bytes(raw[0:4], sys.byteorder)
-
-                if event_type == SDL_QUIT:
-                    running = False
-                elif event_type == SDL_JOYBUTTONDOWN:
-                    button = raw[12]
-
-                    if button == BUTTON_B:
-                        running = False
-                    elif button in (BUTTON_A, BUTTON_X, BUTTON_Y):
-                        texture = render(sdl, renderer, texture, button)
-
-            sdl.SDL_Delay(10)
-
-    finally:
-        if texture:
-            sdl.SDL_DestroyTexture(texture)
-        if renderer:
-            sdl.SDL_DestroyRenderer(renderer)
-        if window:
-            sdl.SDL_DestroyWindow(window)
-        if joystick:
-            sdl.SDL_JoystickClose(joystick)
-
-        sdl.SDL_Quit()
-
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+SDL_JOYBUTTONUP = 0x604
 ```
 
-## 5. Verified controller mapping
+Load SDL2 from the system library and fall back to the verified AArch64 location:
+
+```python
+import ctypes
+import ctypes.util
+
+candidates = [
+    ctypes.util.find_library("SDL2"),
+    "libSDL2-2.0.so.0",
+    "/usr/lib/aarch64-linux-gnu/libSDL2-2.0.so.0",
+]
+
+for candidate in filter(None, candidates):
+    try:
+        sdl = ctypes.CDLL(candidate)
+        break
+    except OSError:
+        pass
+else:
+    raise RuntimeError("SDL2 library not found")
+```
+
+Open joystick index `0` and verify that the device name is `ANBERNIC-keys` on the tested environment.
+
+## 5. Verified physical input mapping
+
+The current mapping was verified through the Diagnostics application and direct testing on the console.
 
 ```text
-D-pad Up:    hat 0, value 1
-D-pad Right: hat 0, value 2
-D-pad Down:  hat 0, value 4
-D-pad Left:  hat 0, value 8
+D-pad Up:       hat 0, value 1
+D-pad Right:    hat 0, value 2
+D-pad Down:     hat 0, value 4
+D-pad Left:     hat 0, value 8
 
-A:      button 0
-B:      button 1
-Y:      button 2
-X:      button 3
-L1:     button 4
-R1:     button 5
-SELECT: button 6
-START:  button 7
-M:      button 8
-Stick:  button 9
-L2:     button 10
-R2:     button 11
-
-Stick horizontal: axis 0
-  Left: negative
-  Right: positive
-
-Stick vertical: axis 1
-  Up: negative
-  Down: positive
+A:              button 0
+B:              button 1
+Y:              button 2
+X:              button 3
+L1:             button 4
+R1:             button 5
+SELECT:         button 6
+START:          button 7
+Stick press:    button 9
+L2:             button 10
+R2:             button 11
+Menu (M):       button 13
+Volume Down:    button 15
+Volume Up:      button 16
 ```
 
-Use this raw hat parsing:
+Button numbers `8`, `12` and `14` remain unassigned. Do not bind application actions to them until a physical or firmware function is verified.
+
+The console also has a physical power button and a reset control. Their SDL button mapping has not been verified. The reset control may interrupt normal execution before an application can record an event, so it must not be assumed to behave like an SDL joystick button.
+
+### Hat parsing
 
 ```python
 hat_index = raw[12]
 hat_value = raw[13]
 ```
 
-A practical initial analogue dead zone is:
-
-```python
-DEAD_ZONE = 8000
-```
-
-Button 13 appeared alongside one M-button event and should remain unassigned. Axes 2 and 3 were reported but not associated with another visible stick.
-
-## 6. Optional internal-speaker audio worker sample
-
-Save this as:
+Hat values may be combined for diagonals:
 
 ```text
-/mnt/mmc/Roms/APPS/My_App/audio_worker.py
+0  centred
+1  up
+2  right
+3  up + right
+4  down
+6  down + right
+8  left
+9  up + left
+12 down + left
 ```
 
-This sample uses the verified audio format and cleanup path. The isolated worker queues one 120 ms, 440 Hz tone at 2% waveform amplitude.
+## 6. Analogue stick input
+
+The physical stick click is `button 9`.
+
+The Linux input inventory for the tested unit exposes `ANBERNIC-keys` through `js0` and `event1`, and advertises absolute axes. SDL button and hat events work, but analogue movement was not reliably observed through the initial SDL event parser. The Diagnostics application therefore reads movement non-blockingly from `/dev/input/js0` while continuing to use SDL for display, buttons and hats.
+
+Linux joystick events are eight-byte packets:
 
 ```python
-#!/usr/bin/env python3
-
-from __future__ import annotations
-
-import ctypes
-import ctypes.util
-import math
 import os
 import struct
-import time
 
-SDL_INIT_AUDIO = 0x00000010
-AUDIO_S16LSB = 0x8010
-SDL_AUDIO_ALLOW_ANY_CHANGE = 0x000F
+JS_EVENT_BUTTON = 0x01
+JS_EVENT_AXIS = 0x02
+JS_EVENT_INIT = 0x80
 
-SAMPLE_RATE = 48000
-CHANNELS = 2
-FREQUENCY = 440.0
-DURATION_SECONDS = 0.12
-AMPLITUDE = 0.02
+fd = os.open("/dev/input/js0", os.O_RDONLY | os.O_NONBLOCK)
+packet = os.read(fd, 8)
+time_ms, value, event_type, number = struct.unpack("<IhBB", packet)
+base_type = event_type & ~JS_EVENT_INIT
 
-
-class SDL_AudioSpec(ctypes.Structure):
-    _fields_ = [
-        ("freq", ctypes.c_int),
-        ("format", ctypes.c_uint16),
-        ("channels", ctypes.c_uint8),
-        ("silence", ctypes.c_uint8),
-        ("samples", ctypes.c_uint16),
-        ("padding", ctypes.c_uint16),
-        ("size", ctypes.c_uint32),
-        ("callback", ctypes.c_void_p),
-        ("userdata", ctypes.c_void_p),
-    ]
-
-
-def load_sdl():
-    name = ctypes.util.find_library("SDL2") or "libSDL2-2.0.so.0"
-    return ctypes.CDLL(name)
-
-
-def bind_sdl(sdl):
-    sdl.SDL_Init.argtypes = [ctypes.c_uint32]
-    sdl.SDL_Init.restype = ctypes.c_int
-    sdl.SDL_GetNumAudioDevices.argtypes = [ctypes.c_int]
-    sdl.SDL_GetNumAudioDevices.restype = ctypes.c_int
-    sdl.SDL_GetAudioDeviceName.argtypes = [ctypes.c_int, ctypes.c_int]
-    sdl.SDL_GetAudioDeviceName.restype = ctypes.c_char_p
-    sdl.SDL_OpenAudioDevice.argtypes = [
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.POINTER(SDL_AudioSpec),
-        ctypes.POINTER(SDL_AudioSpec),
-        ctypes.c_int,
-    ]
-    sdl.SDL_OpenAudioDevice.restype = ctypes.c_uint32
-    sdl.SDL_QueueAudio.argtypes = [
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-    ]
-    sdl.SDL_QueueAudio.restype = ctypes.c_int
-    sdl.SDL_GetQueuedAudioSize.argtypes = [ctypes.c_uint32]
-    sdl.SDL_GetQueuedAudioSize.restype = ctypes.c_uint32
-    sdl.SDL_PauseAudioDevice.argtypes = [ctypes.c_uint32, ctypes.c_int]
-    sdl.SDL_ClearQueuedAudio.argtypes = [ctypes.c_uint32]
-    sdl.SDL_CloseAudioDevice.argtypes = [ctypes.c_uint32]
-
-
-def make_tone():
-    frame_count = int(SAMPLE_RATE * DURATION_SECONDS)
-    fade_frames = int(SAMPLE_RATE * 0.01)
-    output = bytearray()
-
-    for frame in range(frame_count):
-        envelope = min(
-            1.0,
-            frame / max(1, fade_frames),
-            (frame_count - 1 - frame) / max(1, fade_frames),
-        )
-        value = int(
-            32767
-            * AMPLITUDE
-            * envelope
-            * math.sin(2 * math.pi * FREQUENCY * frame / SAMPLE_RATE)
-        )
-        output.extend(struct.pack("<hh", value, value))
-
-    return bytes(output)
-
-
-def main():
-    sdl = load_sdl()
-    bind_sdl(sdl)
-
-    if sdl.SDL_Init(SDL_INIT_AUDIO) != 0:
-        os._exit(10)
-
-    device_id = 0
-
-    try:
-        names = []
-        for index in range(max(0, sdl.SDL_GetNumAudioDevices(0))):
-            raw_name = sdl.SDL_GetAudioDeviceName(index, 0)
-            names.append(raw_name.decode("utf-8", "replace"))
-
-        device_name = next(
-            name for name in names if name.strip().startswith("audiocodec")
-        )
-
-        desired = SDL_AudioSpec(
-            SAMPLE_RATE,
-            AUDIO_S16LSB,
-            CHANNELS,
-            0,
-            1024,
-            0,
-            0,
-            None,
-            None,
-        )
-        obtained = SDL_AudioSpec()
-
-        device_id = sdl.SDL_OpenAudioDevice(
-            device_name.encode(),
-            0,
-            ctypes.byref(desired),
-            ctypes.byref(obtained),
-            SDL_AUDIO_ALLOW_ANY_CHANGE,
-        )
-
-        if not device_id:
-            os._exit(11)
-
-        tone = make_tone()
-        tone_buffer = ctypes.create_string_buffer(tone)
-
-        if sdl.SDL_QueueAudio(device_id, tone_buffer, len(tone)) != 0:
-            os._exit(12)
-
-        sdl.SDL_PauseAudioDevice(device_id, 0)
-
-        deadline = time.monotonic() + 1.2
-        while (
-            time.monotonic() < deadline
-            and sdl.SDL_GetQueuedAudioSize(device_id) > 0
-        ):
-            time.sleep(0.01)
-
-        sdl.SDL_PauseAudioDevice(device_id, 1)
-        sdl.SDL_ClearQueuedAudio(device_id)
-        sdl.SDL_CloseAudioDevice(device_id)
-        device_id = 0
-
-        # Do not call global SDL_Quit() in this audio worker.
-        os._exit(0)
-
-    except Exception:
-        if device_id:
-            try:
-                sdl.SDL_PauseAudioDevice(device_id, 1)
-                sdl.SDL_ClearQueuedAudio(device_id)
-                sdl.SDL_CloseAudioDevice(device_id)
-            except Exception:
-                pass
-
-        os._exit(13)
-
-
-if __name__ == "__main__":
-    main()
+if base_type == JS_EVENT_AXIS:
+    print(number, value)
 ```
 
-Launch the audio worker without blocking the main SDL event loop:
+Production code must buffer partial reads, process every complete eight-byte packet, close the descriptor during shutdown and avoid blocking the SDL render loop.
 
-```python
-import subprocess
-import sys
-from pathlib import Path
-
-APP_DIR = Path(__file__).resolve().parent
-
-audio_process = subprocess.Popen(
-    [sys.executable, str(APP_DIR / "audio_worker.py")],
-    cwd=APP_DIR,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
-```
-
-For a real application, prevent overlapping audio workers and add a parent-side timeout.
-
-## 7. Verified audio behaviour
-
-The internal device is enumerated by SDL as:
+The expected primary mapping remains:
 
 ```text
-audiocodec,
+Axis 0: horizontal, left negative, right positive
+Axis 1: vertical, up negative, down positive
 ```
 
-The accepted format is:
+Discover and report all available axes rather than assuming that only axes `0` and `1` exist. Axes `2` and `3` have been reported but remain physically unassigned. A practical initial dead zone is `8000`, but applications should expose calibration when precision matters.
+
+## 7. Verified internal-speaker audio path
+
+The internal SDL audio device is enumerated as:
 
 ```text
-Sample rate: 48,000 Hz
-Format: 0x8010, signed 16-bit little-endian
-Channels: 2
-SDL samples: 1,024 frames
-SDL buffer size: 4,096 bytes
+audiocodec
+```
+
+Verified audio parameters:
+
+```text
+Sample rate:  48,000 Hz
+Format:       0x8010, signed 16-bit little-endian
+Channels:     2
+SDL samples:  1,024 frames
+Buffer size:  4,096 bytes
 Silence byte: 0
 ```
 
-The tested 120 ms, 440 Hz, 2% amplitude tone was audible through the internal speaker.
+The tested 120 ms, 440 Hz tone at 2% waveform amplitude was audible through the internal speaker.
 
-The verified worker sequence is:
+Use an isolated audio worker with this sequence:
 
-```text
-Initialise SDL audio
-Enumerate audiocodec
-Open device
-Queue PCM
-Unpause
-Wait for queued bytes to reach 0
-Pause
-Clear queue
-Close device
-Exit worker with os._exit(0)
-```
+1. Initialise SDL audio.
+2. Enumerate output devices.
+3. Select the name beginning with `audiocodec`.
+4. Open the device with the verified desired format.
+5. Queue PCM audio.
+6. Unpause playback.
+7. Wait until the queued byte count reaches zero or a parent-side timeout expires.
+8. Pause and clear the queue.
+9. Close the device.
+10. Exit the worker with `os._exit()`.
 
-Global `SDL_Quit()` blocked when called inside the isolated audio worker after the audio device had closed. The worker must skip that call. The graphical parent can still perform normal video and input cleanup when exiting.
+Do not call global `SDL_Quit()` inside the isolated audio worker. That call blocked in testing after the audio device had closed. The graphical parent can still perform normal SDL video and input cleanup.
 
-Do not use `aplay` from the graphical application. The tested blocking `aplay` approach became unresponsive and required a forced power-off.
+Do not use blocking `aplay` from the graphical application. The tested approach became unresponsive and required a forced power-off.
 
-## 8. Development repository sample
+## 8. Diagnostics reference application
 
-On a development machine, use:
+The companion `Diagnostics` package demonstrates the tested application format:
 
 ```text
-my-app-project/
-├── README.md
-├── LICENSE
-├── docs/
-├── tools/
-└── package/
-    ├── My_App.sh
-    └── My_App/
-        ├── main.py
-        ├── audio_worker.py
-        ├── app/
-        │   ├── __init__.py
-        │   ├── ui.py
-        │   ├── input.py
-        │   └── settings.py
-        ├── assets/
-        │   ├── images/
-        │   ├── fonts/
-        │   └── sounds/
-        ├── modules/
-        ├── lib/
-        ├── config/
-        ├── data/
-        └── logs/
+/mnt/mmc/Roms/APPS/
+├── Diagnostics.sh
+└── Diagnostics/
+    ├── main.py
+    ├── audio_worker.py
+    ├── data/
+    └── logs/
 ```
 
-Only the contents of `package/` are copied into `/mnt/mmc/Roms/APPS/`.
+It includes:
 
-## 9. Installation sample
+- Fullscreen SDL2/Pillow interface
+- Physical-layout button display
+- D-pad hat display
+- Direct `/dev/input/js0` analogue monitoring
+- Axis current/minimum/maximum tracking
+- Unknown-button discovery
+- Input report export
+- Verified 440 Hz and 880 Hz audio tests
+- Left, right and both-channel audio sequence
+- Read-only system/runtime information
 
-From a staging directory containing `My_App.sh` and `My_App/`:
+## 9. Installation and validation
+
+From a staging directory containing the launcher and matching folder:
 
 ```bash
 cp -a My_App.sh /mnt/mmc/Roms/APPS/
@@ -762,26 +310,24 @@ ls -lah /mnt/mmc/Roms/APPS/My_App/
 The APPS partition is VFAT. Do not rely on:
 
 - Unix ownership or executable metadata
-- Symlinks
+- Symbolic links
 - Case-sensitive filenames
 - POSIX atomic filesystem behaviour
 
 Store writable content under `config`, `data` or `logs`. Run `sync` after installation and important writes.
 
-If a forced reset leaves the FAT partition dirty or read-only, unmount `/dev/mmcblk0p1` before running `fsck.fat`.
+If a forced reset leaves the FAT partition dirty or read-only, unmount `/dev/mmcblk0p1` before running filesystem repair.
 
 ## 11. Local dependencies
 
-Pure-Python modules belong under `modules/` and are exposed through `PYTHONPATH`.
+Pure-Python dependencies belong under `modules/` and are exposed through `PYTHONPATH`. AArch64 shared libraries belong under `lib/` and are exposed through `LD_LIBRARY_PATH`.
 
-AArch64 shared libraries belong under `lib/` and are exposed through `LD_LIBRARY_PATH`.
-
-AArch64 shared-library dependencies must match:
+Shared libraries must be compatible with:
 
 ```text
 Architecture: aarch64
-Python ABI: Python 3.10
-C library: glibc 2.35 or older-compatible
+Python ABI:   Python 3.10
+C library:    glibc 2.35 or older-compatible
 ```
 
 Do not replace system SDL, glibc or vendor libraries.
@@ -797,45 +343,47 @@ readelf -d my-app | grep NEEDED
 ldd my-app
 ```
 
-AArch64 alone does not guarantee compatibility. Cross-built programs must not require a glibc newer than 2.35.
+AArch64 alone does not guarantee compatibility. Cross-built applications must not require a glibc newer than 2.35.
 
 ## 13. Safe development workflow
 
-1. Keep the last working package as a rollback copy.
-2. Change one subsystem at a time.
-3. Validate shell and Python syntax.
-4. Copy the launcher and matching application folder into the APPS directory.
-5. Run `sync`.
-6. Launch from the stock menu.
-7. Inspect app-local logs.
-8. Confirm normal return to the menu.
-9. Use isolated workers and parent watchdogs for risky operations.
-10. Write and `fsync` small checkpoints around operations that may block.
+- Keep the last working package as a rollback copy.
+- Change one substantial subsystem at a time.
+- Validate shell and Python syntax before copying.
+- Copy the launcher and matching application folder into `APPS`.
+- Run `sync`.
+- Launch from the TF1 menu.
+- Inspect application-local logs.
+- Confirm clean return to the stock menu.
+- Use isolated workers and parent watchdogs for operations that may block.
+- Keep source modules cohesive and avoid unnecessary one-function files.
 
-Do not initially replace `dmenu.bin`, edit the stock launcher scripts, install into `/mnt/vendor`, stop the stock menu process, write directly to `/dev/fb0`, or hardcode paths such as `/dev/input/event1`; identify input devices by name instead.
+Do not initially replace `dmenu.bin`, edit stock launcher scripts, install into `/mnt/vendor`, stop the stock menu process, write directly to `/dev/fb0`, or hardcode an evdev event number when a device can be identified by name.
 
 ## 14. Remaining unknowns
 
 - Exact official firmware version represented by the tests
 - Custom menu icon filename and resource format
-- Purpose of button 13
-- Purpose of reported axes 2 and 3
-- Functions of buttons 12, 14, 15 and 16
+- Functions of buttons `8`, `12` and `14`
+- SDL mapping of the physical power button
+- Whether the reset control produces any recordable input event before resetting
+- Physical purpose of reported axes `2` and `3`
 - HDMI audio behaviour from custom APPS
 - Whether the internal physical speaker path preserves stereo separation
 - Whether global SDL audio shutdown can be made reliable without an isolated worker
 
-## 15. Conclusion
-
-The verified Python application stack is:
+## 15. Verified application stack
 
 ```text
 Top-level APPS shell launcher
   -> Python 3.10.12
+  -> Pillow-generated 640 x 480 frames
   -> SDL2
-  -> the `mali` video driver and accelerated `opengles2` renderer
-  -> ANBERNIC-keys built-in controls exposed as an SDL joystick
-  -> ALSA audiocodec internal-speaker output
+  -> mali video driver
+  -> accelerated opengles2 renderer
+  -> ANBERNIC-keys buttons and D-pad through SDL
+  -> analogue movement through /dev/input/js0 when required
+  -> audiocodec internal-speaker output through an isolated worker
 ```
 
-Use `/mnt/mmc/Roms/APPS/My_App.sh` as the visible entry and `/mnt/mmc/Roms/APPS/My_App/` for code, assets, settings, data and logs.
+Use `/mnt/mmc/Roms/APPS/My_App.sh` as the visible TF1 entry and `/mnt/mmc/Roms/APPS/My_App/` for code, assets, settings, data and logs.
