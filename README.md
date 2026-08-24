@@ -289,8 +289,72 @@ It includes:
 - Low-frequency resonance test from 60 Hz through 315 Hz
 - Append-only `data/audio_report.txt` with enumerated devices, obtained SDL format and test result
 - Read-only system/runtime information
+- Single-page live AXP2202 battery, USB power and thermal monitoring
 
-## 9. Installation and validation
+## 10. Battery, USB power and thermal monitoring
+
+The tested TF1 environment exposes the AXP2202 battery and USB power supplies at:
+
+```text
+/sys/class/power_supply/axp2202-battery
+/sys/class/power_supply/axp2202-usb
+```
+
+Verified battery fields include:
+
+```text
+capacity
+capacity_level
+health
+present
+status
+temp
+voltage_now
+```
+
+Verified USB fields include:
+
+```text
+online
+present
+voltage_now
+```
+
+Use read-only access and tolerate missing or temporarily unreadable values. The relevant unit conversions are:
+
+```text
+battery voltage_now: microvolts, divide by 1,000,000 for volts
+battery temp: tenths of a degree Celsius, divide by 10
+thermal-zone temp: millidegrees Celsius, divide by 1,000
+```
+
+The tested thermal-zone assignments are:
+
+```text
+thermal_zone0: cpu_thermal_zone
+thermal_zone1: gpu_thermal_zone
+thermal_zone2: ve_thermal_zone
+thermal_zone3: ddr_thermal_zone
+thermal_zone4: axp2202-battery
+```
+
+The Diagnostics reference application presents battery level, status, health, voltage, battery temperature, capacity level, battery presence, USB connection state, CPU temperature, GPU temperature, video-engine temperature and DDR temperature on one Battery screen. Values refresh once per second. No separate advanced battery page is used.
+
+Python applications can read a sysfs value safely with:
+
+```python
+from pathlib import Path
+
+def read_sysfs(path, default="Unavailable"):
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return default
+```
+
+Do not write to the power-supply or thermal sysfs attributes from a diagnostics application.
+
+## 10. Installation and validation
 
 From a staging directory containing the launcher and matching folder:
 
@@ -309,7 +373,7 @@ ls -lah /mnt/mmc/Roms/APPS/My_App.sh
 ls -lah /mnt/mmc/Roms/APPS/My_App/
 ```
 
-## 10. Storage rules
+## 11. Storage rules
 
 The APPS partition is VFAT. Do not rely on:
 
@@ -322,7 +386,7 @@ Store writable content under `config`, `data` or `logs`. Run `sync` after instal
 
 If a forced reset leaves the FAT partition dirty or read-only, unmount `/dev/mmcblk0p1` before running filesystem repair.
 
-## 11. Local dependencies
+## 12. Local dependencies
 
 Pure-Python dependencies belong under `modules/` and are exposed through `PYTHONPATH`. AArch64 shared libraries belong under `lib/` and are exposed through `LD_LIBRARY_PATH`.
 
@@ -336,7 +400,7 @@ C library:    glibc 2.35 or older-compatible
 
 Do not replace system SDL, glibc or vendor libraries.
 
-## 12. Compiled application checks
+## 13. Compiled application checks
 
 For a compiled AArch64 application:
 
@@ -349,7 +413,7 @@ ldd my-app
 
 AArch64 alone does not guarantee compatibility. Cross-built applications must not require a glibc newer than 2.35.
 
-## 13. Safe development workflow
+## 14. Safe development workflow
 
 - Keep the last working package as a rollback copy.
 - Change one substantial subsystem at a time.
@@ -364,7 +428,7 @@ AArch64 alone does not guarantee compatibility. Cross-built applications must no
 
 Do not initially replace `dmenu.bin`, edit stock launcher scripts, install into `/mnt/vendor`, stop the stock menu process, write directly to `/dev/fb0`, or hardcode an evdev event number when a device can be identified by name.
 
-## 14. Remaining unknowns
+## 15. Remaining unknowns
 
 - Exact official firmware version represented by the tests
 - Custom menu icon filename and resource format
@@ -376,7 +440,7 @@ Do not initially replace `dmenu.bin`, edit stock launcher scripts, install into 
 - Whether the internal physical speaker path preserves stereo separation
 - Whether global SDL audio shutdown can be made reliable without an isolated worker
 
-## 15. Verified application stack
+## 16. Verified application stack
 
 ```text
 Top-level APPS shell launcher
