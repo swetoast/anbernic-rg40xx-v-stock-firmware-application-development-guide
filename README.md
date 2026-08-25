@@ -16,12 +16,29 @@ These findings apply to the tested TF1 environment. Other firmware releases may 
 Architecture:       aarch64
 Operating system:   Ubuntu 22.04 base
 Python:             3.10.12
+Pillow:             9.0.1
 glibc:              2.35
 Kernel:             Linux 4.9.170
 Display surface:    640 x 480
 SDL video driver:   mali
 SDL renderer:       opengles2
 SDL joystick:       ANBERNIC-keys
+```
+
+### Pillow compatibility
+
+TF1 uses Pillow 9.0.1. Do not require APIs introduced by newer Pillow releases.
+
+In particular, direct use of `Image.Resampling.LANCZOS` is not compatible with the tested environment. Use a compatibility selector:
+
+```python
+from PIL import Image
+
+RESAMPLE_LANCZOS = getattr(
+    getattr(Image, "Resampling", Image),
+    "LANCZOS",
+    getattr(Image, "LANCZOS", Image.BICUBIC),
+)
 ```
 
 ## 2. Application discovery and package layout
@@ -48,7 +65,8 @@ Use a top-level launcher and a matching application folder:
     ├── lib/
     ├── config/
     ├── data/
-    └── logs/
+    ├── logs/
+    └── tests/
 ```
 
 Include only the directories required by the application.
@@ -59,16 +77,19 @@ Include only the directories required by the application.
 - `main.py`: application entry point.
 - `audio_worker.py`: optional isolated SDL audio process.
 - `app/`: substantial application modules.
-- `assets/`: packaged fonts, images and sounds.
+- `assets/`: packaged images, sounds and other local assets.
 - `modules/`: application-local pure-Python dependencies.
 - `lib/`: application-local AArch64 shared libraries.
 - `config/`: persistent settings.
-- `data/`: saves, cache, generated frames, state and reports.
-- `logs/`: runtime logs.
+- `data/`: persistent saves, durable state and intentional caches.
+- `logs/`: bounded runtime logs.
+- `tests/`: consolidated regression tests where the application includes them.
 
-Keep the source structure cohesive. Add a new file only when it represents a substantial separate subsystem. The audio worker is separate because the verified audio shutdown path requires an isolated process.
+Use `/tmp` for render frames, scratch files and session-only state. Do not write high-frequency generated frames into `data/`.
 
-## 3. Complete launcher
+Keep the source structure cohesive. Add a new file only when it represents a substantial separate subsystem. The audio worker is separate because audio operations must not be allowed to block the graphical process.
+
+## 3. Recommended launcher
 
 Save the launcher as:
 
@@ -81,17 +102,79 @@ Save the launcher as:
 
 APP_DIR="/mnt/mmc/Roms/APPS/My_App"
 PYTHON="/usr/bin/python3"
-DATA_DIR="$APP_DIR/data"
-CONFIG_DIR="$APP_DIR/config"
-LOG_DIR="$APP_DIR/logs"
-LOG_FILE="$LOG_DIR/app.log"
+PERSISTENT_DATA="$APP_DIR/data"
+PERSISTENT_CONFIG="$APP_DIR/config"
+PERSISTENT_LOGS="$APP_DIR/logs"
+TEMP_ROOT="/tmp/My_App"
+LOCK_DIR="/tmp/My_App.lock"
+LOCK_PID="$LOCK_DIR/pid"
 
-mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"
+can_write_dir() {
+    directory="$1"
+    test_file="$directory/.write-test.$$"
+    [ -d "$directory" ] || return 1
+    : > "$test_file" 2>/dev/null || return 1
+    rm -f "$test_file" 2>/dev/null
+}
 
-export HOME="$DATA_DIR"
-export XDG_CONFIG_HOME="$CONFIG_DIR"
-export XDG_DATA_HOME="$DATA_DIR"
+acquire_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        printf '%s\n' "$$" > "$LOCK_PID"
+        return 0
+    fi
+
+    old_pid=""
+    [ -r "$LOCK_PID" ] && old_pid="$(cat "$LOCK_PID" 2>/dev/null)"
+    case "$old_pid" in
+        ''|*[!0-9]*) ;;
+        *)
+            if kill -0 "$old_pid" 2>/dev/null; then
+                return 1
+            fi
+            ;;
+    esac
+
+    rm -rf "$LOCK_DIR" 2>/dev/null || return 1
+    mkdir "$LOCK_DIR" 2>/dev/null || return 1
+    printf '%s\n' "$$" > "$LOCK_PID"
+}
+
+cleanup() {
+    current_pid=""
+    [ -r "$LOCK_PID" ] && current_pid="$(cat "$LOCK_PID" 2>/dev/null)"
+    if [ "$current_pid" = "$$" ]; then
+        rm -rf "$LOCK_DIR" 2>/dev/null || true
+    fi
+}
+
+mkdir -p "$PERSISTENT_DATA" "$PERSISTENT_CONFIG" "$PERSISTENT_LOGS" 2>/dev/null || true
+mkdir -p "$TEMP_ROOT/home" "$TEMP_ROOT/config" "$TEMP_ROOT/data" "$TEMP_ROOT/logs" || exit 1
+
+acquire_lock || exit 0
+trap cleanup EXIT INT TERM HUP
+
+if can_write_dir "$PERSISTENT_DATA"; then
+    export HOME="$PERSISTENT_DATA"
+    export XDG_DATA_HOME="$PERSISTENT_DATA"
+else
+    export HOME="$TEMP_ROOT/home"
+    export XDG_DATA_HOME="$TEMP_ROOT/data"
+fi
+
+if can_write_dir "$PERSISTENT_CONFIG"; then
+    export XDG_CONFIG_HOME="$PERSISTENT_CONFIG"
+else
+    export XDG_CONFIG_HOME="$TEMP_ROOT/config"
+fi
+
+if can_write_dir "$PERSISTENT_LOGS"; then
+    LOG_FILE="$PERSISTENT_LOGS/app.log"
+else
+    LOG_FILE="$TEMP_ROOT/logs/app.log"
+fi
+
 export SDL_NOMOUSE=1
+export PYTHONDONTWRITEBYTECODE=1
 
 if [ -d "$APP_DIR/modules" ]; then
     export PYTHONPATH="$APP_DIR/modules:${PYTHONPATH:-}"
@@ -103,11 +186,14 @@ fi
 
 cd "$APP_DIR" || exit 1
 "$PYTHON" "$APP_DIR/main.py" >> "$LOG_FILE" 2>&1
-STATUS=$?
-
-sync
-exit "$STATUS"
+exit $?
 ```
+
+The lock prevents multiple fullscreen instances. The writable-directory checks allow the application to start with temporary state if the APPS partition is read-only.
+
+Bound persistent log growth. Do not allow normal runtime logs to grow indefinitely.
+
+Do not run `sync` after every ordinary application exit. Use it after installation or after an important persistent update when data has actually changed.
 
 Validate and normalise the launcher before installation:
 
@@ -180,6 +266,14 @@ ANBERNIC-keys
 
 Request the accelerated renderer with present synchronisation first. If renderer creation fails, retry with the software renderer.
 
+Render transient Pillow frames under `/tmp`, for example:
+
+```text
+/tmp/My_App-screen.bmp
+```
+
+Remove the transient frame during normal shutdown.
+
 ## 5. Verified physical input mapping
 
 The following mapping was verified by direct testing on the console.
@@ -196,23 +290,28 @@ Left:     hat 0, value 8
 ### Buttons
 
 ```text
-A:              button 0
-B:              button 1
-Y:              button 2
-X:              button 3
-L1:             button 4
-R1:             button 5
-Select:         button 6
-Start:          button 7
-Stick press:    button 9
-L2:             button 10
-R2:             button 11
-Menu (M):       button 13
-Volume Down:    button 15
-Volume Up:      button 16
+A:               button 0
+B:               button 1
+Y:               button 2
+X:               button 3
+L1:              button 4
+R1:              button 5
+Select:          button 6
+Start:           button 7
+Menu Hold:       button 8
+Stick press:     button 9
+L2:              button 10
+R2:              button 11
+Menu short:      button 13
+Volume Down:     button 15
+Volume Up:       button 16
 ```
 
-Buttons `8`, `12` and `14` remain unassigned. Do not bind application actions to those numbers until a physical or firmware function is verified.
+Button `13` is the normal short Menu press. TF1 emits button `8` as a separate Menu Hold event. Applications should preserve short button `13` presses as ordinary input.
+
+If button `8` is used for navigation, do not assume a conventional paired down/up lifetime. Remove it from the application's held-button state after handling the navigation event.
+
+Buttons `12` and `14` remain physically unassigned. Do not bind actions to them until a physical or firmware function is verified.
 
 The console also has physical power and reset controls. Their SDL mapping has not been verified. The reset control may interrupt execution before an application can record an event.
 
@@ -236,6 +335,10 @@ Combined diagonal values are possible:
 9    up + left
 12   down + left
 ```
+
+### Test activation
+
+If a button press starts an input test, do not count that same press as test data. Arm the test on button down and begin capture after the activation button is released.
 
 ## 6. Analogue stick input
 
@@ -279,6 +382,7 @@ Production code must:
 - Ignore or separately handle initialisation events.
 - Close the descriptor during shutdown.
 - Avoid blocking the SDL event and render loop.
+- Enumerate available axes rather than assuming only axes `0` and `1` exist.
 
 ### Verified primary axes
 
@@ -292,7 +396,7 @@ Axis 1: vertical
   Down:  positive
 ```
 
-Enumerate every available axis rather than assuming that only axes `0` and `1` exist. Axes `2` and `3` have been reported but remain physically unassigned.
+Axes `2` and `3` have been reported but remain physically unassigned.
 
 A practical initial dead zone is:
 
@@ -301,6 +405,8 @@ DEAD_ZONE = 8000
 ```
 
 Applications requiring precise analogue input should support calibration instead of treating this value as universal.
+
+For drift, range and circularity measurements, use a controlled sample interval independent of the render-loop speed. A 50 ms interval is used by the tested Diagnostics implementation.
 
 ## 7. Verified internal-speaker audio
 
@@ -323,6 +429,8 @@ Silence byte:   0
 
 A 120 ms, 440 Hz tone at 2% waveform amplitude was audible through the internal speaker.
 
+The audio device accepts two-channel PCM. This does not prove the presence of two physical speakers or preserved acoustic stereo separation. The tested console has one visible front speaker grille. Left-only, right-only and combined signals remain useful for checking routing and mixing behaviour.
+
 ### Required worker sequence
 
 Use an isolated audio worker:
@@ -333,11 +441,13 @@ Use an isolated audio worker:
 4. Open it with the verified desired format.
 5. Queue PCM audio.
 6. Unpause the device.
-7. Wait until the queued byte count reaches zero or a parent-side timeout expires.
+7. Wait until the queued byte count reaches zero or a worker deadline expires.
 8. Pause the device.
 9. Clear the queue.
 10. Close the device.
-11. Exit the worker with `os._exit()`.
+11. Terminate the worker process without calling global `SDL_Quit()`.
+
+A worker deadline prevents a stuck queue from hanging the worker. The graphical parent should also retain a watchdog and terminate an unresponsive worker.
 
 Do not call global `SDL_Quit()` from the isolated audio worker. That call blocked during testing after the device had closed. The graphical parent process can still perform normal SDL video and input cleanup.
 
@@ -347,13 +457,15 @@ Do not use blocking `aplay` from the graphical application. The tested approach 
 
 Useful validation patterns include:
 
-- Left-channel test.
-- Right-channel test.
-- Left, right and both-channel sequence.
+- Left-only signal.
+- Right-only signal.
+- Left, right and combined output sequence.
 - Frequency-range test from 100 Hz through 16 kHz.
 - Output-level progression from 1% through 25% waveform amplitude.
 - Low-frequency resonance test from 60 Hz through 315 Hz.
 - Optional logging of enumerated devices, obtained format and playback result.
+
+Use neutral names such as `Output sequence` or `Channel mixing check` unless physical stereo separation is verified.
 
 ## 8. Battery telemetry
 
@@ -443,6 +555,8 @@ Applications can combine these interfaces with runtime information such as:
 
 Battery temperature remains on the Battery screen.
 
+The current Diagnostics reference view displays CPU and GPU telemetry. VE and DDR are available to applications but are not currently shown by that reference view.
+
 ## 10. Display and screen testing
 
 The tested framebuffer is:
@@ -501,7 +615,99 @@ B:                 return to Diagnostics
 
 Do not implement brightness adjustment or resolution switching until a safe control interface has been verified.
 
-## 11. Reference implementation
+## 11. Verified fonts and text rendering
+
+TF1 provides these usable fonts:
+
+```text
+/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf
+/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf
+/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf
+/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf
+/usr/share/fonts/TTF/DejaVuSansMono.ttf
+```
+
+All seven loaded successfully through Pillow at sizes `10`, `12`, `14`, `16`, `22` and `36` on the tested device.
+
+Recommended UI roles:
+
+```text
+DejaVu Sans:
+  Labels, descriptions, instructions and natural-language status
+
+DejaVu Sans Bold:
+  Page titles, selected menu titles and major headings
+
+DejaVu Sans Mono:
+  Coordinates, percentages, temperatures, voltages, capacity and elapsed time
+
+DejaVu Sans Mono Bold:
+  Prominent aligned measurements
+```
+
+Do not assume Liberation Sans is installed.
+
+The font under `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` is preferred over `/usr/share/fonts/TTF/DejaVuSansMono.ttf` for compact UI text on the tested environment.
+
+Measure text using the active font rather than truncating by character count. Fit titles, status badges, card values and footer text by rendered pixel width.
+
+## 12. Joystick RGB configuration
+
+The tested TF1 environment stores joystick-ring configuration at:
+
+```text
+/mnt/data/dmenu/mculed_attr.ini
+```
+
+The tested file is:
+
+```text
+Size:       184 bytes
+Structure:  46 little-endian unsigned 32-bit words
+Integrity:  word 45
+```
+
+The following fields were identified in the tested configuration:
+
+```text
+word 27    foreground red
+word 28    foreground green
+word 29    foreground blue
+word 30    brightness
+word 42    background red
+word 43    background green
+word 44    background blue
+```
+
+Treat effect and enabled fields as read-only unless their behaviour is separately verified.
+
+Before editing:
+
+- Verify the expected file size.
+- Verify the integrity field.
+- Reject editing when verification fails.
+- Clamp editable byte-style values to `0` through `255`.
+- Preserve the original bytes.
+- Write and verify the complete replacement.
+- Restore the original if verification fails.
+
+Do not write unverified data directly to a live LED device endpoint.
+
+The physical ring may not reload the file immediately. On the tested setup, changed values became visible after Diagnostics exited and TF1 reloaded the configuration.
+
+These offsets and integrity rules are firmware-specific and must not be assumed on other releases without verification.
+
+## 13. Offline assets
+
+Bundle required UI assets locally. Do not depend on network-hosted fonts, icons or images.
+
+A compact application may use a single cohesive sprite sheet instead of many small icon files. Keep readable text labels so the interface remains usable if a decorative asset cannot be loaded.
+
+Do not bundle fonts that already exist in the verified TF1 environment unless the application requires a specific unavailable typeface.
+
+## 14. Reference implementation
 
 A tested reference package uses:
 
@@ -511,25 +717,34 @@ A tested reference package uses:
 └── Diagnostics/
     ├── main.py
     ├── audio_worker.py
+    ├── assets/
+    │   └── diagnostics-icons.png
     ├── data/
-    └── logs/
+    ├── logs/
+    └── tests/
+        └── test_diagnostics.py
 ```
 
 The reference implementation demonstrates:
 
 - Fullscreen SDL2 and Pillow rendering.
 - Physical-layout button testing.
+- Separate short Menu and Menu Hold handling.
 - D-pad hat testing.
 - Direct `/dev/input/js0` analogue monitoring.
+- Controlled analogue sampling.
 - Axis range tracking.
 - Unknown-button discovery.
-- Input-state and axis-range reporting.
-- Expanded audio validation and optional result logging.
+- Expanded audio validation through an isolated worker.
 - Screen and pixel test patterns.
 - Battery telemetry through the AXP2202 power-supply interface.
 - Runtime, USB-power and thermal telemetry.
+- Local offline icon assets with a text-only fallback.
+- Regression tests consolidated in one test file.
 
-## 12. Installation and validation
+Do not retain generated frame files under `data/`. The active render path should remain under `/tmp`.
+
+## 15. Installation and validation
 
 From a staging directory containing the launcher and matching folder:
 
@@ -543,26 +758,32 @@ Validate the installation:
 
 ```bash
 bash -n /mnt/mmc/Roms/APPS/My_App.sh
-python3 -m py_compile /mnt/mmc/Roms/APPS/My_App/main.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile /mnt/mmc/Roms/APPS/My_App/main.py
 ls -lah /mnt/mmc/Roms/APPS/My_App.sh
 ls -lah /mnt/mmc/Roms/APPS/My_App/
 ```
 
-## 13. VFAT storage constraints
+Use `sync` after installation. Do not force it after every routine application exit.
 
-The APPS partition is VFAT. Do not rely on:
+## 16. VFAT storage constraints
 
-- Unix ownership.
-- Unix executable metadata.
+The APPS partition is VFAT.
+
+Do not rely on:
+
+- Unix ownership or permissions.
+- Executable metadata.
 - Symbolic links.
 - Case-sensitive filenames.
-- POSIX atomic filesystem behaviour.
+- Fully POSIX-compliant replacement semantics.
 
-Store writable content under `config`, `data` or `logs`. Run `sync` after installation and important writes.
+Use `/tmp` for render frames, scratch files and session-only state.
 
-If a forced reset leaves the partition dirty or read-only, unmount `/dev/mmcblk0p1` before running filesystem repair.
+Use `config/`, `data/` and `logs/` only for content that must persist.
 
-## 14. Local dependencies
+Avoid unnecessary writes.
+
+## 17. Local dependencies
 
 Pure-Python dependencies belong under `modules/` and are added to `PYTHONPATH` by the launcher.
 
@@ -578,7 +799,7 @@ C library:      glibc 2.35 or older-compatible
 
 Do not replace the system SDL, glibc or vendor libraries.
 
-## 15. Compiled application checks
+## 18. Compiled application checks
 
 For a compiled AArch64 application:
 
@@ -591,13 +812,13 @@ ldd my-app
 
 An AArch64 build is not automatically compatible with TF1. Cross-built applications must not require a glibc version newer than `2.35`.
 
-## 16. Safe development workflow
+## 19. Safe development workflow
 
 1. Keep the last working package as a rollback copy.
 2. Change one substantial subsystem at a time.
 3. Validate shell and Python syntax before copying.
 4. Copy the launcher and matching application folder into `APPS`.
-5. Run `sync`.
+5. Run `sync` after installation.
 6. Launch from the TF1 menu.
 7. Inspect application-local logs.
 8. Confirm a clean return to the stock menu.
@@ -613,32 +834,38 @@ Do not initially:
 - Write directly to `/dev/fb0`.
 - Hardcode an evdev event number when a device can be identified by name.
 
-## 17. Remaining unknowns
+## 20. Remaining unknowns
 
 - Exact official firmware version represented by the tests.
 - Custom menu icon filename and resource format.
-- Functions of buttons `8`, `12` and `14`.
+- Physical functions of buttons `12` and `14`.
 - SDL mapping of the physical power button.
 - Whether the reset control produces a recordable event before reset.
 - Physical purpose of reported axes `2` and `3`.
 - HDMI audio behaviour from custom applications.
 - Whether the internal physical speaker path preserves stereo separation.
 - Whether global SDL audio shutdown can be made reliable without an isolated worker.
+- Whether joystick-ring configuration offsets differ between TF1 releases.
 
-## 18. Verified application stack
+## 21. Verified application stack
 
 ```text
 Top-level APPS shell launcher
   -> Python 3.10.12
-  -> Pillow-generated 640 x 480 frames
+  -> Pillow 9.0.1
+  -> Pillow-generated 640 x 480 frames under /tmp
   -> SDL2
   -> mali video driver
-  -> accelerated opengles2 renderer
+  -> accelerated opengles2 renderer with software fallback
   -> ANBERNIC-keys buttons and D-pad through SDL
+  -> short Menu on button 13
+  -> Menu Hold on button 8
   -> analogue movement through /dev/input/js0 when required
   -> audiocodec internal-speaker output through an isolated worker
   -> AXP2202 battery and USB power telemetry through sysfs
   -> Linux thermal-zone telemetry through sysfs
+  -> DejaVu Sans text and DejaVu Sans Mono measurements
+  -> local offline UI assets
 ```
 
-Use `/mnt/mmc/Roms/APPS/My_App.sh` as the visible TF1 menu entry and `/mnt/mmc/Roms/APPS/My_App/` for code, assets, settings, data and logs.
+Use `/mnt/mmc/Roms/APPS/My_App.sh` as the visible TF1 menu entry and `/mnt/mmc/Roms/APPS/My_App/` for code, assets, settings, persistent data and logs.
