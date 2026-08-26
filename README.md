@@ -707,7 +707,100 @@ A compact application may use a single cohesive sprite sheet instead of many sma
 
 Do not bundle fonts that already exist in the verified TF1 environment unless the application requires a specific unavailable typeface.
 
-## 14. Reference implementation
+## 14. Verified Wi-Fi and Bluetooth
+
+### Wi-Fi
+
+TF1 exposes two wireless interfaces:
+
+```text
+wlan0
+wlan1
+```
+
+Both interfaces use the `rtl8821cs` driver. The tested environment exposes 2.4 GHz and 5 GHz Wi-Fi support.
+
+During verification, `wlan0` was connected in managed mode on `5220 MHz`. The reported signal was `-35 dBm`, the reported transmit link rate was `434.0 MBit/s`, and Wi-Fi power saving was enabled. These are link-state values, not measured application throughput.
+
+The active network-management stack includes:
+
+```text
+NetworkManager
+wpa_supplicant
+```
+
+Available network tools include:
+
+```text
+ip
+iw
+iwconfig
+rfkill
+wpa_cli
+wpa_supplicant
+nmcli
+```
+
+One saved Wi-Fi profile was present during verification. The saved Wi-Fi connection reconnects after reboot on the tested device.
+
+The default gateway was reachable during verification. A single DNS lookup check did not return a result, so DNS reliability was not established by that check.
+
+### Bluetooth
+
+TF1 exposes a Realtek Bluetooth controller as:
+
+```text
+hci0
+```
+
+The controller uses UART transport and reports Bluetooth HCI 4.1. It supports central and peripheral roles.
+
+The active Bluetooth stack includes:
+
+```text
+bluetoothd
+rtk_hciattach
+rtl_btlpm
+```
+
+Available Bluetooth tools include:
+
+```text
+bluetoothctl
+hciconfig
+hcitool
+rfkill
+```
+
+The tested `bluetoothctl` version supports filtered device queries using:
+
+```text
+bluetoothctl devices Paired
+bluetoothctl devices Connected
+bluetoothctl devices Bonded
+```
+
+The older `paired-devices` command is not supported on the tested environment.
+
+The following accessories were simultaneously reported by BlueZ as paired, bonded and connected:
+
+- Google Pixel Buds Pro.
+- Nintendo Pro Controller.
+
+The Nintendo Pro Controller worked correctly for normal controller input on the tested TF1 environment.
+
+The controller can remain powered with connected accessories while not discoverable. During the connected-device verification it was powered, pairable, not discoverable and not discovering.
+
+TF1 exposes a BlueALSA playback definition through ALSA:
+
+```text
+bluealsa
+    Bluetooth Audio
+```
+
+The verified ALSA inventory also exposed the internal `audiocodec` device and the HDMI audio device.
+
+## 15. Reference implementation
 
 A tested reference package uses:
 
@@ -744,7 +837,7 @@ The reference implementation demonstrates:
 
 Do not retain generated frame files under `data/`. The active render path should remain under `/tmp`.
 
-## 15. Installation and validation
+## 16. Installation and validation
 
 From a staging directory containing the launcher and matching folder:
 
@@ -765,7 +858,7 @@ ls -lah /mnt/mmc/Roms/APPS/My_App/
 
 Use `sync` after installation. Do not force it after every routine application exit.
 
-## 16. VFAT storage constraints
+## 17. VFAT storage constraints
 
 The APPS partition is VFAT.
 
@@ -783,7 +876,7 @@ Use `config/`, `data/` and `logs/` only for content that must persist.
 
 Avoid unnecessary writes.
 
-## 17. Local dependencies
+## 18. Local dependencies
 
 Pure-Python dependencies belong under `modules/` and are added to `PYTHONPATH` by the launcher.
 
@@ -799,7 +892,7 @@ C library:      glibc 2.35 or older-compatible
 
 Do not replace the system SDL, glibc or vendor libraries.
 
-## 18. Compiled application checks
+## 19. Compiled application checks
 
 For a compiled AArch64 application:
 
@@ -812,7 +905,7 @@ ldd my-app
 
 An AArch64 build is not automatically compatible with TF1. Cross-built applications must not require a glibc version newer than `2.35`.
 
-## 19. Safe development workflow
+## 20. Safe development workflow
 
 1. Keep the last working package as a rollback copy.
 2. Change one substantial subsystem at a time.
@@ -834,7 +927,7 @@ Do not initially:
 - Write directly to `/dev/fb0`.
 - Hardcode an evdev event number when a device can be identified by name.
 
-## 20. Remaining unknowns
+## 21. Remaining unknowns
 
 - Exact official firmware version represented by the tests.
 - Custom menu icon filename and resource format.
@@ -847,7 +940,7 @@ Do not initially:
 - Whether global SDL audio shutdown can be made reliable without an isolated worker.
 - Whether joystick-ring configuration offsets differ between TF1 releases.
 
-## 21. Verified application stack
+## 22. Verified application stack
 
 ```text
 Top-level APPS shell launcher
@@ -866,6 +959,9 @@ Top-level APPS shell launcher
   -> Linux thermal-zone telemetry through sysfs
   -> DejaVu Sans text and DejaVu Sans Mono measurements
   -> local offline UI assets
+  -> rtl8821cs 2.4 GHz and 5 GHz Wi-Fi through NetworkManager and wpa_supplicant
+  -> Realtek Bluetooth 4.1 through BlueZ and the UART H5 transport
+  -> BlueALSA Bluetooth audio definition
 ```
 
 Use `/mnt/mmc/Roms/APPS/My_App.sh` as the visible TF1 menu entry and `/mnt/mmc/Roms/APPS/My_App/` for code, assets, settings, persistent data and logs.
