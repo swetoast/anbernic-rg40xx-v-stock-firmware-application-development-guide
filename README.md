@@ -1,6 +1,6 @@
 # RG40XX V Stock Firmware Application Development Guide
 
-This guide documents application packaging, runtime behaviour and hardware interfaces tested on an Anbernic RG40XX V using the stock firmware environment referred to here as **TF1**.
+This guide documents application packaging, runtime behaviour and hardware interfaces tested on Anbernic RG40XX V hardware using the stock firmware environment referred to here as **TF1**. Most findings were verified on a first unit and independently re-confirmed on a second unit; where the two units differed, the difference is recorded below as verified per-unit behaviour.
 
 This guide distinguishes between:
 
@@ -19,11 +19,13 @@ Python:             3.10.12
 Pillow:             9.0.1
 glibc:              2.35
 Kernel:             Linux 4.9.170
-Display surface:    640 x 480
+Display surface:    640 x 480   (SDL fullscreen app render target; see Section 10)
 SDL video driver:   mali
 SDL renderer:       opengles2
 SDL joystick:       ANBERNIC-keys
 ```
+
+The architecture, OS base, Python, Pillow, glibc, kernel and SDL video driver above were re-confirmed on a second unit. The display surface is the SDL fullscreen render target used by applications; the raw framebuffer console geometry differs from it and is state-dependent — see Section 10.
 
 ### Pillow compatibility
 
@@ -216,6 +218,8 @@ mali SDL video driver
 opengles2 accelerated renderer
 ```
 
+The `mali` video driver was re-confirmed on a second unit through a video-only `SDL_InitSubSystem(SDL_INIT_VIDEO)` probe. The accelerated `opengles2` renderer requires a window and was not re-probed headlessly.
+
 ### SDL constants
 
 ```python
@@ -303,8 +307,8 @@ Stick press:     button 9
 L2:              button 10
 R2:              button 11
 Menu short:      button 13
-Volume Down:     button 15
-Volume Up:       button 16
+Volume Down:     button 15   (see per-unit note below)
+Volume Up:       button 16   (see per-unit note below)
 ```
 
 Button `13` is the normal short Menu press. TF1 emits button `8` as a separate Menu Hold event. Applications should preserve short button `13` presses as ordinary input.
@@ -312,6 +316,8 @@ Button `13` is the normal short Menu press. TF1 emits button `8` as a separate M
 If button `8` is used for navigation, do not assume a conventional paired down/up lifetime. Remove it from the application's held-button state after handling the navigation event.
 
 Buttons `12` and `14` remain physically unassigned. Do not bind actions to them until a physical or firmware function is verified.
+
+**Per-unit button/axis count (verified on a second unit).** A second RG40XX V unit reported `14` joystick buttons (valid indices `0`–`13`) and `6` axes through `js0`, read via the `JSIOCGBUTTONS` and `JSIOCGAXES` ioctls. Buttons `0`–`13`, including Menu Hold (`8`) and short Menu (`13`), matched the table across both units. However, on that unit **Volume Down and Volume Up were not present as joystick buttons `15` and `16`** — a 14-button device has no index `15` or `16`. Treat the volume keys as potentially exposed through evdev `EV_KEY` events on `event1` (or another input node) rather than as SDL joystick buttons, and confirm their source per unit before binding them. The `axes 0/1` primary mapping in Section 6 was unaffected; the additional reported axes are covered there.
 
 The console also has physical power and reset controls. Their SDL mapping has not been verified. The reset control may interrupt execution before an application can record an event.
 
@@ -396,7 +402,7 @@ Axis 1: vertical
   Down:  positive
 ```
 
-Axes `2` and `3` have been reported but remain physically unassigned.
+A second unit reported `6` axes in total via `JSIOCGAXES`. Only axes `0` and `1` (the stick) have verified physical meaning; axes `2` and `3` have been reported but remain physically unassigned, and the remaining reported axes are likewise unconfirmed. This is why applications must enumerate the axis count rather than assuming a fixed set.
 
 A practical initial dead zone is:
 
@@ -415,6 +421,8 @@ The internal SDL output device is enumerated as:
 ```text
 audiocodec
 ```
+
+The `audiocodec` card was re-confirmed as ALSA card `0` on a second unit; that unit also enumerated `ahubdam` and `ahubhdmi` (HDMI audio) cards, and a `bluealsa` PCM when the Bluetooth stack was up.
 
 ### Verified format
 
@@ -487,7 +495,7 @@ temp
 voltage_now
 ```
 
-Read these attributes without modifying them, and handle missing or temporarily unreadable values.
+All seven attributes were re-confirmed present on a second unit. Read these attributes without modifying them, and handle missing or temporarily unreadable values.
 
 ### Unit conversions
 
@@ -543,7 +551,7 @@ thermal_zone3: ddr_thermal_zone
 thermal_zone4: axp2202-battery
 ```
 
-Thermal-zone values are reported in millidegrees Celsius. Divide by `1,000` for degrees Celsius.
+All five zone names were re-confirmed in order on a second unit. Thermal-zone values are reported in millidegrees Celsius. Divide by `1,000` for degrees Celsius.
 
 Applications can combine these interfaces with runtime information such as:
 
@@ -565,22 +573,52 @@ The tested framebuffer is:
 /dev/fb0
 ```
 
-### Verified framebuffer properties
+### Framebuffer geometry is state-dependent, not a fixed constant
+
+The raw fbdev geometry depends on which process currently owns the display mode. It is **not** a fixed hardware property, and it differs between the idle console and a running fullscreen application. Two states have been verified on separate units:
+
+**Idle / console state** (verified via `/sys/class/graphics/fb0/*` and `FBIOGET_VSCREENINFO`):
 
 ```text
-Visible resolution:    640 x 480
-Virtual resolution:    640 x 960
-Pixel depth:           32 bits
+Visible resolution:    1280 x 1024
+Virtual resolution:    1280 x 1024   (single-buffered; visible == virtual)
+Pixel depth:           16 bits
 Stride:                2,560 bytes
 Rotation:              0
 State:                 0
+```
+
+**SDL application-path state** (framebuffer held by a fullscreen SDL app):
+
+```text
+Visible resolution:    640 x 480
+Virtual resolution:    640 x 960     (double height for page flipping)
+Pixel depth:           32 bits
+Stride:                2,560 bytes
+```
+
+Both states report the same panel modes:
+
+```text
 Reported modes:        1280 x 1024 at 59 Hz
                        640 x 480 at 59 Hz
 ```
 
-The `2,560`-byte stride is consistent with a 640-pixel row using four bytes per pixel.
+The `2,560`-byte stride is identical in both states by coincidence, not correspondence: `640 x 4` bytes at 32 bpp and `1280 x 2` bytes at 16 bpp both equal `2,560`. Do not treat a matching stride as confirmation of resolution or pixel depth.
 
-The probe exposed:
+Because the geometry changes when an application takes the framebuffer, applications must not assume a fixed fbdev resolution, depth, stride or buffer count. When a raw value is genuinely required, read the current geometry at runtime rather than hardcoding it:
+
+```python
+import fcntl, os, struct
+
+fd = os.open("/dev/fb0", os.O_RDONLY)
+buffer = bytearray(256)
+fcntl.ioctl(fd, 0x4600, buffer)  # FBIOGET_VSCREENINFO
+xres, yres, xres_virtual, yres_virtual, xoffset, yoffset, bpp = struct.unpack_from("<7I", buffer, 0)
+os.close(fd)
+```
+
+The probe exposed, in both states:
 
 ```text
 No DRM connector entries
@@ -589,7 +627,7 @@ No X11 display
 No Wayland display
 ```
 
-Use the verified fullscreen SDL2 path instead of writing directly to `/dev/fb0`.
+Use the verified fullscreen SDL2 path with a 640 x 480 surface instead of writing directly to `/dev/fb0`. SDL/mali negotiates its own mode when an application goes fullscreen, which is why the app-path surface (640 x 480) and the idle console geometry (1280 x 1024) are both valid at different moments. Rendering through SDL keeps the application independent of the underlying fbdev state, so the recommended application render target remains 640 x 480.
 
 ### Recommended screen-test patterns
 
@@ -629,7 +667,7 @@ TF1 provides these usable fonts:
 /usr/share/fonts/TTF/DejaVuSansMono.ttf
 ```
 
-All seven loaded successfully through Pillow at sizes `10`, `12`, `14`, `16`, `22` and `36` on the tested device.
+All seven paths were re-confirmed present on a second unit, and a Pillow truetype load succeeded there. All seven loaded successfully through Pillow at sizes `10`, `12`, `14`, `16`, `22` and `36` on the tested device.
 
 Recommended UI roles:
 
@@ -668,6 +706,8 @@ Size:       184 bytes
 Structure:  46 little-endian unsigned 32-bit words
 Integrity:  word 45
 ```
+
+The `184`-byte size and the 46-word structure were re-confirmed on a second unit, with a populated foreground colour, brightness and background colour at the offsets below and a non-zero integrity value at word 45. The integrity value itself is instance-specific and will differ between units.
 
 The following fields were identified in the tested configuration:
 
@@ -718,9 +758,9 @@ wlan0
 wlan1
 ```
 
-Both interfaces use the `rtl8821cs` driver. The tested environment exposes 2.4 GHz and 5 GHz Wi-Fi support.
+Both interfaces use the `rtl8821cs` driver, re-confirmed on a second unit. The tested environment exposes 2.4 GHz and 5 GHz Wi-Fi support.
 
-During verification, `wlan0` was connected in managed mode on `5220 MHz`. The reported signal was `-35 dBm`, the reported transmit link rate was `434.0 MBit/s`, and Wi-Fi power saving was enabled. These are link-state values, not measured application throughput.
+During verification, `wlan0` was connected in managed mode on a 5 GHz channel with a saved profile that reconnected after reboot. Reported signal strength and transmit link rate are link-state values that vary by environment and are not measured application throughput.
 
 The active network-management stack includes:
 
@@ -741,7 +781,7 @@ wpa_supplicant
 nmcli
 ```
 
-One saved Wi-Fi profile was present during verification. The saved Wi-Fi connection reconnects after reboot on the tested device.
+All of the above tools were re-confirmed present on a second unit. One saved Wi-Fi profile was present during verification, and the saved connection reconnects after reboot on the tested device.
 
 The default gateway was reachable during verification. A single DNS lookup check did not return a result, so DNS reliability was not established by that check.
 
@@ -753,7 +793,7 @@ TF1 exposes a Realtek Bluetooth controller as:
 hci0
 ```
 
-The controller uses UART transport and reports Bluetooth HCI 4.1. It supports central and peripheral roles.
+The controller uses UART transport and reports Bluetooth HCI 4.1. It supports central and peripheral roles. On a second unit, `hci0` was present with `bluetoothd` and `rtk_hciattach` running.
 
 The active Bluetooth stack includes:
 
@@ -798,7 +838,7 @@ bluealsa
     Bluetooth Audio
 ```
 
-The verified ALSA inventory also exposed the internal `audiocodec` device and the HDMI audio device.
+The verified ALSA inventory also exposed the internal `audiocodec` device and the HDMI audio device. The `bluealsa` PCM was re-confirmed present on a second unit while the Bluetooth stack was running.
 
 ## 15. Reference implementation
 
@@ -860,7 +900,7 @@ Use `sync` after installation. Do not force it after every routine application e
 
 ## 17. VFAT storage constraints
 
-The APPS partition is VFAT.
+The APPS partition is VFAT (re-confirmed as `vfat` on a second unit).
 
 Do not rely on:
 
@@ -932,13 +972,15 @@ Do not initially:
 - Exact official firmware version represented by the tests.
 - Custom menu icon filename and resource format.
 - Physical functions of buttons `12` and `14`.
+- The input source of the Volume Down and Volume Up keys. They were mapped to joystick buttons `15` and `16` on the first unit, but a second unit exposed only `14` joystick buttons (indices `0`–`13`), implying the volume keys arrive as evdev key events on that unit rather than as SDL joystick buttons.
 - SDL mapping of the physical power button.
 - Whether the reset control produces a recordable event before reset.
-- Physical purpose of reported axes `2` and `3`.
+- Physical purpose of the reported axes beyond `0` and `1` (a second unit reported `6` axes total).
 - HDMI audio behaviour from custom applications.
 - Whether the internal physical speaker path preserves stereo separation.
 - Whether global SDL audio shutdown can be made reliable without an isolated worker.
 - Whether joystick-ring configuration offsets differ between TF1 releases.
+- Why the idle-console framebuffer geometry (1280 x 1024 at 16 bpp on a second unit) differs from the SDL application-path surface (640 x 480 at 32 bpp), beyond the general observation that SDL/mali sets its own mode on fullscreen.
 
 ## 22. Verified application stack
 
